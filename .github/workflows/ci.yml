@@ -1,0 +1,112 @@
+name: Daily Build mcMMO
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Check if rebuild is required 
+    runs-on: ubuntu-latest
+    outputs:
+      commit_hash: ${{ steps.get-latest-commit.outputs.short_commit }}
+      need_build: ${{ steps.cache-hash.outputs.cache-hit != 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: "mcMMO-Dev/mcMMO"
+      
+      - name: Get Latest Commit Hash
+        id: get-latest-commit
+        run: |
+          latest_commit=$(git rev-parse HEAD)
+          echo "Latest commit: $latest_commit"
+          echo "latest_commit=$latest_commit" >> $GITHUB_OUTPUT
+          
+          short_commit=${latest_commit::7}
+          echo "short_commit: $short_commit"
+          echo "short_commit=$short_commit" >> $GITHUB_OUTPUT
+
+      - name: Get Last Commit Hash from Cache
+        id: cache-hash
+        uses: actions/cache@v3
+        with:
+          path: last_commit
+          key: mcmmo-commit-hash-${{ steps.get-latest-commit.outputs.latest_commit }}
+
+      - name: Write New Commit hash to Cache
+        if: ${{ steps.cache-hash.outputs.cache-hit != 'true' }}
+        run: |
+          echo "$latest_commit" > ./last_commit
+
+  build:
+    name: Build Jar
+    needs:
+      - check
+    if: ${{ needs.check.outputs.need_build == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      version_name: ${{ steps.metadata.outputs.info }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          repository: "mcMMO-Dev/mcMMO"
+      
+      - name: get version name
+        id: metadata
+        uses: mavrosxristoforos/get-xml-info@1.0
+        with:
+          xml-file: "pom.xml"
+          xpath: "//*[local-name()='project']/*[local-name()='version']"
+
+      - name: set up JDK
+        uses: actions/setup-java@v3
+        with:
+          java-version: "21"
+          distribution: "adopt"
+          cache: maven
+      
+      - name: Build with Maven
+        run: mvn clean install
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcMMO
+          path: target
+
+  release:
+    name: Upload the dist to GitHub release
+    needs:
+      - check
+      - build
+    if: ${{ needs.check.outputs.need_build == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcMMO
+          path: target
+
+      - run: |
+          echo ${{ needs.build.outputs.version_name }}
+          echo ${{ needs.check.outputs.commit_hash }}
+          mv target/mcMMO.jar target/mcMMO-${{ needs.build.outputs.version_name }}-${{ needs.check.outputs.commit_hash }}.jar
+
+      - name: Create release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ needs.build.outputs.version_name }}
+          makeLatest: true
+          allowUpdates: true
+          name: ${{ needs.build.outputs.version_name }}
+          body: 'Please see https://github.com/mcMMO-Dev/mcMMO/blob/master/Changelog.txt for changelog.'
+          artifacts: "target/mcMMO-${{ needs.build.outputs.version_name }}-${{ needs.check.outputs.commit_hash }}.jar"
+          token: ${{ secrets.GITHUB_TOKEN }}
